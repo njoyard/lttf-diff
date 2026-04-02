@@ -1,0 +1,128 @@
+name: 'Lint to the Future Diff'
+description: 'Comments on pull requests with LTTF diffs, and can be used to block merges that add new ignores'
+branding:
+  icon: 'award'
+  color: 'orange'
+inputs:
+  data:
+    description: 'Path or URL to fetch current main branch `data.json` file'
+    default: ''
+    required: false
+  folder:
+    description: 'The github-pages folder the Lint to the Future dashboard is deployed into'
+    default: ''
+    required: false
+  fail:
+    description: 'Set to "true" (default) to fail when increased ignore counts are detected, or "false" to succeed anyway'
+    default: 'true'
+    required: false
+  node-version:
+    description: 'The Node.js version to use, passed directly to actions/setup-node node-version field'
+    default: '20'
+    required: false
+  cache:
+    description: 'This is passed directly to the actions/setup-node cache field. Refer to their readme for valid values'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{inputs.node-version}}
+        cache: ${{inputs.cache}}
+
+    - name: Fetch previous lttf data
+      if: startsWith(inputs.data, 'http')
+      run: |
+        mkdir lttfTemp
+        curl -o lttfTemp/data.json ${{ inputs.data }}
+      shell: bash
+
+    - name: Copy previous lttf data
+      if: inputs.data != '' && !startsWith(inputs.data, 'http')    
+      run: |
+        mkdir lttfTemp
+        cp ${{inputs.data}} lttfTemp/data.json
+      shell: bash
+
+    - name: Read previous Lttf data from the gh-pages branch
+      if: inputs.data == ''
+      uses: actions/checkout@v4
+      with:
+        ref: gh-pages
+        sparse-checkout: ${{ startsWith('/', inputs.folder) && '.'}}${{ inputs.folder }}${{ endsWith('/', inputs.folder) && '' || '/' }}data.json
+        path: lttfTemp
+
+    - name: Generate diff
+      run: npx lint-to-the-future diff -o ./lttfTemp/diff.json  --previous-results lttfTemp/${{ startsWith('/', inputs.folder) && '.'}}${{ inputs.folder }}${{ endsWith('/', inputs.folder) && '' || '/' }}data.json
+      shell: bash
+
+    - name: Create or update PR comment
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs')
+
+          const marker = '<!-- lttf-diff -->'
+          const diff = JSON.parse(fs.readFileSync('./lttfTemp/diff.json', 'utf8'))
+          const empty = Object.keys(diff).length === 0
+          
+          const { owner, repo } = context.repo
+          const issue_number = context.issue.number
+
+          const comments = await github.paginate(
+            github.rest.issues.listComments,
+            { owner, repo, issue_number }
+          )
+
+          const existing = comments.data.find(c => c.body.includes(marker) && c.user.type === 'Bot')
+
+          if (!empty) {
+            let table = '| Plugin | Rule | Changes |\n| - | - | - |'
+            for (const plugin in diff) {
+              for (const rule in diff[plugin]) {
+                const count = diff[plugin][rule]
+                const text = count > 0 ? `❌ ${count} ignores added` : `✅ ${-count} ignores removed`
+                table += `\n| \`${plugin.replace('lint-to-the-future-', '')}\` | \`${rule}\` | ${text}`
+              }
+            }
+
+            const body = '\n\n'.join([
+              marker,
+              '## Lint-to-the-Future diff 🚀',
+              'The following changes were made to file-based ignores:',
+              table
+            ])
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              })
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              })
+            }
+          } else if (existing) {
+            await github.rest.issues.deleteComment({
+              owner,
+              repo,
+              comment_id: existing.id
+            })
+          }
+
+    - name: Fail when ignores have increased
+      run: |
+        INCREASED=$(jq '[.[] | .[] | select(. > 0)] | length' ./lttfTemp/diff.json)
+        if [ $INCREASED -gt 0 ]; then
+          echo "$INCREASED rules have increased ignore counts, failing"
+          exit 1
+        fi
+      shell: bash
