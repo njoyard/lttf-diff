@@ -55,7 +55,7 @@ runs:
         path: lttfTemp
 
     - name: Generate diff
-      run: npx lint-to-the-future diff -o ./lttfTemp/diff.json  --previous-results lttfTemp/${{ startsWith('/', inputs.folder) && '.'}}${{ inputs.folder }}${{ endsWith('/', inputs.folder) && '' || '/' }}data.json
+      run: pnpm lint-to-the-future diff -o ./lttfTemp/diff.json  --previous-results lttfTemp/${{ startsWith('/', inputs.folder) && '.'}}${{ inputs.folder }}${{ endsWith('/', inputs.folder) && '' || '/' }}data.json
       shell: bash
 
     - name: Create or update PR comment
